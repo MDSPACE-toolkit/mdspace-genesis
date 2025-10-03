@@ -54,7 +54,8 @@ optional_base = at_input.o at_boundary.o at_boundary_str.o \
 	at_md_leapfrog.o at_md_vverlet.o at_md_vverlet_cg.o at_qmmm.o \
 	at_ensemble.o at_ensemble_str.o \
 	at_dynamics.o at_dynamics_str.o \
-	at_morph.o at_morph_str.o
+	at_morph.o at_morph_str.o\
+	at_nmmd.o
 optional_objs = $(foreach file, $(optional_base), ../../../atdyn/$(file))
 
 SUFFIXES = .fpp
