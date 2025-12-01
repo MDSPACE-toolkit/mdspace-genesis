@@ -550,7 +550,7 @@ contains
 
     if (main_rank) then
       write(MsgOut,'(A)') 'Setup_Experiments_EmfitImg> Setup variables for EMFIT for images'
-      write(MsgOut,'(A20,F10.3)') '  cutoff (pixel)    = ', experiments%emfit_img%cutoff
+      write(MsgOut,'(A20,F10.3)') '  cutoff (pixel)    = ', REAL(experiments%emfit_img%cutoff)
     end if
 
   end subroutine setup_experiments_emfit_img
