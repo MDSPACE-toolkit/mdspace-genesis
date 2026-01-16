@@ -30,6 +30,9 @@ module at_experiments_mod
 #ifdef HAVE_MPI_GENESIS
   use mpi
 #endif
+#ifdef OMP
+  use omp_lib
+#endif
 
   implicit none
   private
@@ -50,6 +53,7 @@ module at_experiments_mod
     real(wp)                        :: emfit_shift_x      = 0.0
     real(wp)                        :: emfit_shift_y      = 0.0
     real(wp)                        :: emfit_shift_z      = 0.0
+    integer                         :: emfit_image_freq   = 1
 
   end type s_exp_info
 
@@ -71,6 +75,7 @@ module at_experiments_mod
   real(wp),       allocatable, save :: dot_sim_drhody(:)
   real(wp),       allocatable, save :: dot_sim_drhodz(:)
   real(wp),       allocatable, save :: emfit_force(:,:)
+  real(wp),       allocatable, save :: xpix(:), ypix(:)
   character(MaxFilename)          :: emfit_target_test    = ''
 
   ! subroutines
@@ -127,6 +132,7 @@ contains
         write(MsgOut,'(A)') '# emfit_shift_x       = 0.0  # Shift in x direction in pixel'
         write(MsgOut,'(A)') '# emfit_shift_y       = 0.0  # Shift in y direction in pixel'
         write(MsgOut,'(A)') '# emfit_shift_z       = 0.0  # Shift in z direction in pixel'
+        write(MsgOut,'(A)') '# emfit_image_freq    = 1    # Write simulated image every N EMFIT steps'
         write(MsgOut,'(A)') ' '
 
       end select
@@ -204,6 +210,9 @@ contains
 
     call read_ctrlfile_real(handle, Section, 'emfit_pixel_size',		    &
                               exp_info%emfit_pixel_size)
+
+    call read_ctrlfile_integer(handle, Section, 'emfit_image_freq',         &
+                              exp_info%emfit_image_freq)
 
     call end_ctrlfile_section(handle)
 
@@ -519,11 +528,14 @@ contains
     type(s_exp_info),        intent(in)    :: exp_info
     type(s_molecule),        intent(in)    :: molecule
 
+    integer :: i
+
     experiments%emfit_img%pixel_size  = exp_info%emfit_pixel_size 
     experiments%emfit_img%shift_x     = exp_info%emfit_shift_x    
     experiments%emfit_img%shift_y     = exp_info%emfit_shift_y   
     experiments%emfit_img%period      = exp_info%emfit_period
     experiments%emfit_img%sigma       = exp_info%emfit_sigma    
+    experiments%emfit_img%image_period = exp_info%emfit_image_freq
 
     emfit_icycle = -1
     
@@ -542,11 +554,25 @@ contains
           experiments%emfit_img%image_size)
 
     call alloc_experiments(experiments, ExperimentsEmfitImg, &
-            experiments%emfit_img%image_size,molecule%num_atoms,0,0,0)
+      experiments%emfit_img%image_size, molecule%num_atoms,  &
+      2*experiments%emfit_img%cutoff + 1, 0, 0)
 
     call read_data_spi(exp_info%emfit_target, experiments%emfit_img%target_img)
 
     emfit_target_test = exp_info%emfit_target
+
+    ! Precompute pixel coordinate vectors (used by EMFIT-IMG kernels)
+    if (allocated(xpix)) deallocate(xpix)
+    if (allocated(ypix)) deallocate(ypix)
+
+    allocate(xpix(experiments%emfit_img%image_size))
+    allocate(ypix(experiments%emfit_img%image_size))
+
+    do i = 1, experiments%emfit_img%image_size
+      xpix(i) = (real(i, wp) - 1.0_wp - real(experiments%emfit_img%image_size, wp)/2.0_wp) * &
+                experiments%emfit_img%pixel_size
+      ypix(i) = xpix(i)
+    end do
 
     if (main_rank) then
       write(MsgOut,'(A)') 'Setup_Experiments_EmfitImg> Setup variables for EMFIT for images'
@@ -652,7 +678,7 @@ contains
     integer           :: sum_ig, ave_ig
     integer           :: idomain, axis_length(3), iaxis
     integer           :: itmp1, itmp2, icount1
-    integer           :: id, omp_get_thread_num
+    integer           :: id
     integer           :: max_natom_local
     logical           :: do_allocate
 
@@ -1197,8 +1223,8 @@ contains
     real(wp),                intent(inout) 	:: eexp
     real(wp),                intent(inout) 	:: cv
   
-    integer                   :: i, j, a, n_atoms, n_pix, group_id, &
-                                  n, n_atoms_group, cutoff, image_size
+    integer :: i, j, a, n_atoms, n_pix, group_id, &
+               n, n_atoms_group, cutoff, image_size, ii, jj, tid, nt
     real(wp) :: roll_angle, tilt_angle, yaw_angle, shift_x, shift_y, pixel_size
     real(wp) :: gaussian, sigma, norm, threshold
     real(wp) :: sum_sim2, sum_exp2, sum_simpexp, force_constant	
@@ -1284,35 +1310,63 @@ contains
     end do
   
     ! ------------------------------------------------------------------------
-    ! GENERATE SIM IMAGE
+    ! GENERATE SIM IMAGE (CG-style: row ownership, no 3D thread buffers)
+    !   MPI: split atoms by my_city_rank/nproc_city to avoid double count
     ! ------------------------------------------------------------------------
     sim_image(:,:) = 0.0_wp
-  
-    !$omp parallel do default(none)                                 &
-    !$omp private(a,i,j , mu, norm, gaussian)                   &
-    !$omp shared(pixels, n_pix,image_size, pixel_size, &
-    !$omp 	rot_coord, sigma, sim_image, gaussians_saved, atom_id, group_id, n_atoms_group)
-    !
-  
-    do a=1, n_atoms_group
-      do j=pixels(2,a), pixels(2,a) + n_pix
-        do i=pixels(1,a), pixels(1,a) + n_pix
 
-          mu = (/i,j/)
-          mu = (mu -1- (image_size / 2)) * pixel_size
-  
-          norm = (rot_coord(1,a)-mu(1))**2 + (rot_coord(2,a)-mu(2))**2
-          gaussian = exp(-norm / (2 * (sigma ** 2)))
-          
+#ifdef OMP
+    !$omp parallel default(none) &
+    !$omp private(a,n,i,j,ii,jj,gaussian,norm,tid,nt) &
+    !$omp shared(sim_image, pixels, n_pix, image_size, xpix, ypix, rot_coord, sigma, &
+    !$omp        gaussians_saved, atom_id, group_id, n_atoms_group, my_city_rank, nproc_city)
+
+    tid = omp_get_thread_num()
+    nt  = omp_get_num_threads()
+
+    do a = my_city_rank + 1, n_atoms_group, nproc_city
+      n = atom_id(a, group_id)
+
+      ! Each thread updates only its owned rows j = start+tid .. step nt
+      do j = pixels(2,a) + tid, pixels(2,a) + n_pix, nt
+        jj = j - pixels(2,a) + 1
+        do i = pixels(1,a), pixels(1,a) + n_pix
+          ii = i - pixels(1,a) + 1
+
+          norm = (rot_coord(1,a) - xpix(i))**2 + (rot_coord(2,a) - ypix(j))**2
+          gaussian = exp(-norm / (2.0_wp * sigma**2))
+
           sim_image(i,j) = sim_image(i,j) + gaussian
-  
-          ! save the gaussian to avoid computing them for the gradient
-          gaussians_saved(i,j,a) = gaussian    
+          gaussians_saved(ii,jj,a) = gaussian
+        end do
+      end do
+
+      !$omp barrier
+    end do
+
+    !$omp end parallel
+#else
+    do a = my_city_rank + 1, n_atoms_group, nproc_city
+      n = atom_id(a, group_id)
+      do j = pixels(2,a), pixels(2,a) + n_pix
+        jj = j - pixels(2,a) + 1
+        do i = pixels(1,a), pixels(1,a) + n_pix
+          ii = i - pixels(1,a) + 1
+
+          norm = (rot_coord(1,a) - xpix(i))**2 + (rot_coord(2,a) - ypix(j))**2
+          gaussian = exp(-norm / (2.0_wp * sigma**2))
+
+          sim_image(i,j) = sim_image(i,j) + gaussian
+          gaussians_saved(ii,jj,a) = gaussian
         end do
       end do
     end do
-  
-    !$omp end parallel do
+#endif
+
+#ifdef HAVE_MPI_GENESIS
+    call mpi_allreduce(MPI_IN_PLACE, sim_image, image_size*image_size, &
+                       mpi_wp_real, mpi_sum, mpi_comm_city, ierror)
+#endif
   
     ! ------------------------------------------------------------------------
     ! COMPUTE CC
@@ -1337,47 +1391,76 @@ contains
   
     ! ------------------------------------------------------------------------
     ! GRADIENT COMPUTATION
+    !   - each rank computes only its atom subset (same split as image build)
+    !   - forces are then summed across ranks via MPI_Allreduce
     ! ------------------------------------------------------------------------
     if (calc_force) then
-  
-      const1 = 1/ sqrt(sum_sim2 * sum_exp2)
+
+      const1 = 1.0_wp / sqrt(sum_sim2 * sum_exp2)
       const2 = sum_simpexp / (sqrt(sum_exp2) * sum_sim2**(1.5_wp))
+
       emfit_img_force(:,:) = 0.0_wp
-  
-      !$omp parallel do default(none)                                 &
-      !$omp private(a,n, i, j,mu, dpsim,dcc)     &
-      !$omp shared(pixels, n_pix, image_size, pixel_size, &
-      !$omp 	rot_coord, sigma, sim_image, gaussians_saved, atom_id, group_id,&
-      !$omp 	exp_image, const1, const2, force_constant,&
-      !$omp 	emfit_img_force,inv_rot_matrix, force, experiments)
-      !
-  
-      do a= 1, n_atoms_group
-  
-        n=  atom_id(a,group_id)
+
+#ifdef OMP
+      !$omp parallel do default(none) schedule(static) &
+      !$omp private(a,n,i,j,ii,jj,dcc,mu,dpsim) &
+      !$omp shared(pixels,n_pix,image_size,xpix,ypix,pixel_size,rot_coord,sigma, &
+      !$omp        sim_image,gaussians_saved,atom_id,group_id,n_atoms_group, &
+      !$omp        const1,const2,exp_image,force_constant,emfit_img_force,experiments, &
+      !$omp        my_city_rank,nproc_city)
+      do a = my_city_rank + 1, n_atoms_group, nproc_city
+        n = atom_id(a, group_id)
+
         dcc = 0.0_wp
-  
-        do j=pixels(2,a), pixels(2,a) + n_pix
-          do i=pixels(1,a), pixels(1,a) + n_pix
+        do j = pixels(2,a), pixels(2,a) + n_pix
+          jj = j - pixels(2,a) + 1
+          do i = pixels(1,a), pixels(1,a) + n_pix
+            ii = i - pixels(1,a) + 1
 
-            mu = (/i,j/)
-            mu = (mu -1- (image_size / 2)) * pixel_size
-            dpsim = -(rot_coord(1:2,a) - mu) * gaussians_saved(i,j,a) / (sigma ** 2)
-            dcc = dcc + ((exp_image(i,j) * dpsim * const1) - ( sim_image(i,j) * dpsim * const2))
+            ! dpsim = -(rot_coord(1:2,a) - mu) * gaussian / sigma^2
+            dpsim(1) = -(rot_coord(1,a) - xpix(i)) * gaussians_saved(ii,jj,a) / (sigma**2)
+            dpsim(2) = -(rot_coord(2,a) - ypix(j)) * gaussians_saved(ii,jj,a) / (sigma**2)
 
+            dcc = dcc + (exp_image(i,j) * dpsim * const1) - (sim_image(i,j) * dpsim * const2)
           end do
-        enddo
-  
+        end do
+
         emfit_img_force(1:2,n) = dcc * force_constant
         emfit_img_force(1:3,n) = matmul(experiments%emfit_img%inv_rot_matrix(1:3,1:3), &
-                                  emfit_img_force(1:3,n))
-  
+                                        emfit_img_force(1:3,n))
+      end do
+      !$omp end parallel do
+#else
+      do a = my_city_rank + 1, n_atoms_group, nproc_city
+        n = atom_id(a, group_id)
+        dcc = 0.0_wp
+        do j = pixels(2,a), pixels(2,a) + n_pix
+          jj = j - pixels(2,a) + 1
+          do i = pixels(1,a), pixels(1,a) + n_pix
+            ii = i - pixels(1,a) + 1
+            dpsim(1) = -(rot_coord(1,a) - xpix(i)) * gaussians_saved(ii,jj,a) / (sigma**2)
+            dpsim(2) = -(rot_coord(2,a) - ypix(j)) * gaussians_saved(ii,jj,a) / (sigma**2)
+            dcc = dcc + (exp_image(i,j) * dpsim * const1) - (sim_image(i,j) * dpsim * const2)
+          end do
+        end do
+        emfit_img_force(1:2,n) = dcc * force_constant
+        emfit_img_force(1:3,n) = matmul(experiments%emfit_img%inv_rot_matrix(1:3,1:3), &
+                                        emfit_img_force(1:3,n))
+      end do
+#endif
+
+#ifdef HAVE_MPI_GENESIS
+      call mpi_allreduce(MPI_IN_PLACE, emfit_img_force, 3*size(emfit_img_force,2), &
+                         mpi_wp_real, mpi_sum, mpi_comm_city, ierror)
+#endif
+
+      ! Add EMFIT forces to integrator force array (serial, safe)
+      do a = 1, n_atoms_group
+        n = atom_id(a, group_id)
         force(1:3,n) = force(1:3,n) + emfit_img_force(1:3,n)
       end do
-  
-      !$omp end parallel do
-    end if
 
+    end if
 
     ! ------------------------------------------------------------------------
     ! WRITE OUTPUT IMAGE

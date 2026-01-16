@@ -1,7 +1,7 @@
 !--------1---------2---------3---------4---------5---------6---------7---------8
 !
 !  Module   at_experiments_str_mod
-!> @brief   structure of experiments information
+!> @brief   structure of replica information
 !! @authors Osamu Miyashita (OM), Takaharu Mori (TM)
 ! 
 !  (c) Copyright 2014 RIKEN. All rights reserved.
@@ -60,13 +60,19 @@ module at_experiments_str_mod
     real(wp), allocatable :: gaussians_saved(:,:,:)
     real(wp), allocatable :: emfit_img_force(:,:)
 
+    ! global arrays for mpi reduction
+    !real(wp), allocatable :: simulated_img_global(:,:)
+    !real(wp), allocatable :: gaussians_saved_global(:,:,:)
+    !integer :: dummy_value
+
     integer               :: image_size
     real(wp)              :: pixel_size 
     real(wp)              :: roll_angle 
     real(wp)              :: tilt_angle 
     real(wp)              :: yaw_angle  
     real(wp)              :: shift_x    
-    real(wp)              :: shift_y   
+    real(wp)              :: shift_y
+    integer               :: image_period   
 
     integer               :: period
     real(wp)              :: sigma     
@@ -86,7 +92,7 @@ module at_experiments_str_mod
   end type s_experiments
 
   ! parameters for allocatable variables
-  integer,      public, parameter :: ExperimentsEmfit = 1
+  integer,      public, parameter :: ExperimentsEmfit  = 1
   integer,      public, parameter :: ExperimentsEmfitImg = 2
 
   character(*), public, parameter :: ExperimentsTypes(2)  = (/&
@@ -108,10 +114,8 @@ contains
   !! @param[inout] experiments      : information of experiments
   !! @param[in]    variable  : allocatable variable
   !! @param[in]    var_size1 : size of variables
-  !! @param[in]    var_size2 : size of variables (optional)
-  !! @param[in]    var_size3 : size of variables (optional)
-  !! @param[in]    var_size4 : size of variables (optional)
-  !! @param[in]    var_size5 : size of variables (optional)
+  !! @param[in]    var_size2 : size of variables
+  !! @param[in]    var_size3 : size of variables
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
@@ -170,12 +174,14 @@ contains
 
       if (allocated(experiments%emfit_img%target_img)) then
         if (size(experiments%emfit_img%target_img(:,1)) == var_size1) return
-        deallocate(experiments%emfit_img%target_img,      &
-                   experiments%emfit_img%simulated_img,   &
-                   experiments%emfit_img%rot_coord,       &
-                   experiments%emfit_img%pixels,          &
-                   experiments%emfit_img%gaussians_saved, &
-                   experiments%emfit_img%emfit_img_force, &
+        deallocate(experiments%emfit_img%target_img,             &
+                   experiments%emfit_img%simulated_img,          &
+                   experiments%emfit_img%rot_coord,              &
+                   experiments%emfit_img%pixels,                 &
+                   experiments%emfit_img%gaussians_saved,        &
+                   experiments%emfit_img%emfit_img_force,        &
+                   !experiments%emfit_img%simulated_img_global,   &
+                   !experiments%emfit_img%gaussians_saved_global, &
                    stat = dealloc_stat)
       end if
 
@@ -183,20 +189,27 @@ contains
                experiments%emfit_img%simulated_img(var_size1, var_size1), &
                experiments%emfit_img%rot_coord    (3, var_size2),         &
                experiments%emfit_img%pixels       (2, var_size2),         &
-               experiments%emfit_img%gaussians_saved(var_size1, var_size1, var_size2), & 
-               experiments%emfit_img%emfit_img_force(3, var_size2),         &     
+!               experiments%emfit_img%gaussians_saved(var_size1, var_size1, var_size2), & 
+! modify to store only cutoff rather than full image
+               experiments%emfit_img%gaussians_saved(var_size3, var_size3, var_size2), &                
+               experiments%emfit_img%emfit_img_force(3, var_size2),         &
+              !experiments%emfit_img%simulated_img_global(var_size1, var_size1), &
+              !experiments%emfit_img%gaussians_saved_global(var_size1, var_size1, var_size2), &
                stat = alloc_stat)
 
       experiments%emfit_img%target_img   (1:var_size1, 1:var_size1) = 0.0_wp
       experiments%emfit_img%simulated_img(1:var_size1, 1:var_size1) = 0.0_wp
       experiments%emfit_img%rot_coord(1:3, 1:var_size2) = 0.0_wp
       experiments%emfit_img%pixels(1:2, 1:var_size2) = 0
-      experiments%emfit_img%gaussians_saved(1:var_size1, 1:var_size1, 1:var_size2) = 0.0_wp
+      !experiments%emfit_img%gaussians_saved(1:var_size1, 1:var_size1, 1:var_size2) = 0.0_wp
+      experiments%emfit_img%gaussians_saved(1:var_size3, 1:var_size3, 1:var_size2) = 0.0_wp
       experiments%emfit_img%emfit_img_force(1:3, 1:var_size2) = 0.0_wp
+      !experiments%emfit_img%simulated_img_global(1:var_size1, 1:var_size1) = 0.0_wp
+      !experiments%emfit_img%gaussians_saved_global(1:var_size1, 1:var_size1, 1:var_size2) = 0.0_wp
 
     case default
 
-      call error_msg('Alloc_Experiments> bad variable')
+      call error_msg('Alloc_Replica> bad variable')
 
     end select
 
@@ -213,8 +226,8 @@ contains
   !  Subroutine    dealloc_experiments
   !> @brief        deallocate experiments information
   !! @authors      TM
-  !! @param[inout] experiments : experiments information
-  !! @param[in]    variable    : allocatable variable
+  !! @param[inout] experiments     : experiments information
+  !! @param[in]    variable : allocatable variable
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
@@ -255,6 +268,8 @@ contains
                    experiments%emfit_img%pixels,          &
                    experiments%emfit_img%gaussians_saved, &
                    experiments%emfit_img%emfit_img_force, &
+                   !experiments%emfit_img%simulated_img_global,   &
+                   !experiments%emfit_img%gaussians_saved_global, &
                    stat = dealloc_stat)
       end if
 
@@ -262,7 +277,7 @@ contains
 
       call error_msg('Dealloc_Experiments> bad variable')
 
-    end select 
+    end select
 
 
     if (dealloc_stat /= 0) call error_msg_dealloc
@@ -283,7 +298,7 @@ contains
   subroutine dealloc_experiments_all(experiments)
 
     ! formal arguments
-    type(s_experiments),     intent(inout) :: experiments
+    type(s_experiments),         intent(inout) :: experiments
 
 
     call dealloc_experiments(experiments, ExperimentsEmfit)
