@@ -1374,20 +1374,26 @@ contains
     ! ------------------------------------------------------------------------
     ! COMPUTE CC
     ! ------------------------------------------------------------------------
-    sum_sim2 = 0.0
-    sum_exp2 = 0.0
-    sum_simpexp = 0.0
+    sum_sim2    = 0.0_wp
+    sum_exp2    = 0.0_wp
+    sum_simpexp = 0.0_wp
 
-    do j=1, image_size
-      
-      do i=1, image_size
-        sum_sim2 = sum_sim2 + sim_image(i,j) ** 2
-        sum_exp2 = sum_exp2 + exp_image(i,j) ** 2
+#ifdef OMP
+    !$omp parallel do default(none) collapse(2) private(i,j) &
+    !$omp reduction(+:sum_sim2,sum_exp2,sum_simpexp) shared(image_size,sim_image,exp_image)
+#endif
+    do j = 1, image_size
+      do i = 1, image_size
+        sum_sim2    = sum_sim2    + sim_image(i,j) * sim_image(i,j)
+        sum_exp2    = sum_exp2    + exp_image(i,j) * exp_image(i,j)
         sum_simpexp = sum_simpexp + exp_image(i,j) * sim_image(i,j)
       end do
     end do
-  
-    cv= (sum_simpexp / sqrt(sum_sim2 * sum_exp2))
+#ifdef OMP
+    !$omp end parallel do
+#endif
+
+    cv = sum_simpexp / sqrt(sum_sim2 * sum_exp2)
     force_constant = enefunc%restraint_const(1,inum)
     eexp = force_constant * (1.0_wp - cv)
     corrcoeff_save = cv
