@@ -1,0 +1,63 @@
+[INPUT]
+pdbfile      = ../../../build/cryoEM/Img_fit/AK.pdb
+grotopfile      = ../../../build/cryoEM/Img_fit/AK.pdb.top
+
+[OUTPUT]
+
+[ENERGY]
+forcefield = CAGO
+electrostatic = CUTOFF
+switchdist = 15.000000
+cutoffdist = 15.000000
+pairlistdist = 25.000000
+ 
+[DYNAMICS]
+iseed = 1
+integrator = VVER
+timestep = 0.001000
+nsteps = 500
+nbupdate_period = 1
+eneout_period = 1
+rstout_period = 0
+crdout_period = 0
+ 
+[NMMD]
+nm_number = 3
+nm_file = ../../../build/cryoEM/Img_fit/modes.nma
+nm_mass = 5.000000
+nm_dt = 0.001000
+ 
+[ENSEMBLE]
+ensemble = NVT
+tpcontrol = LANGEVIN
+temperature= 0.000000
+ 
+[BOUNDARY]
+type            = NOBC 
+
+[CONSTRAINTS]
+rigid_bond = NO
+fast_water = NO
+
+[EXPERIMENTS]
+emfit = YES
+emfit_sigma= 4.000000
+emfit_tolerance = 0.010000
+emfit_period = 1
+emfit_type = IMAGE
+emfit_target    = ../../../build/cryoEM/Img_fit/AK.spi
+emfit_pixel_size = 2.000000
+emfit_roll_angle = 117.681420
+emfit_tilt_angle = 27.381548
+emfit_yaw_angle = -92.454138
+emfit_shift_x = 3.480149
+emfit_shift_y = -1.361012
+
+[SELECTION]
+group1 = all and not hydrogen
+
+[RESTRAINTS]
+nfunctions = 1
+function1 = EM
+constant1 = 3000.000000
+select_index1 = 1
