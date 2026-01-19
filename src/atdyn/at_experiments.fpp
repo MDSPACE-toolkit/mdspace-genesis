@@ -399,9 +399,12 @@ contains
     experiments%emfit%dy = dy
     experiments%emfit%dz = dz
 
-    experiments%emfit%sigma        = exp_info%emfit_sigma
-    experiments%emfit%tolerance    = exp_info%emfit_tolerance
-    experiments%emfit%emfit_period = exp_info%emfit_period
+    experiments%emfit%sigma          = exp_info%emfit_sigma
+    experiments%emfit%tolerance      = exp_info%emfit_tolerance
+    experiments%emfit%emfit_period   = exp_info%emfit_period
+    experiments%emfit_img%roll_angle = exp_info%emfit_roll_angle
+    experiments%emfit_img%tilt_angle = exp_info%emfit_tilt_angle
+    experiments%emfit_img%yaw_angle  = exp_info%emfit_yaw_angle
 
     ! set target EM density map
     !
@@ -1467,7 +1470,7 @@ contains
     ! ------------------------------------------------------------------------
     if (main_rank) then
       outfile = emfit_target_test(:index(emfit_target_test, '.', back=.true.)-1) //"_sim.spi"
-      if (mod(emfit_icycle,100) == 0) then 
+      if (mod(emfit_icycle, max(1, experiments%emfit_img%image_period)) == 0) then
         call write_spi(outfile, sim_image)
       endif
     endif
