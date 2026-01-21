@@ -592,8 +592,15 @@ contains
 
       else if (experiments%emfit_type == ExperimentsEmfitImg) then
        
+#ifdef HAVE_MPI_GENESIS
+      if (main_rank) then
         call compute_energy_experimental_restraint_emfit_img &
-              (enefunc, coord, inum, calc_force, force, virial, eexp, cv)
+             (enefunc, coord, inum, calc_force, force, virial, eexp, cv)
+      end if
+#else
+      call compute_energy_experimental_restraint_emfit_img &
+       (enefunc, coord, inum, calc_force, force, virial, eexp, cv)
+#endif
       endif
     end if
 
