@@ -548,6 +548,36 @@ contains
 
     emfit_target_test = exp_info%emfit_target
 
+#ifdef HAVE_MPI_GENESIS
+    call mpi_comm_size(mpi_comm_city, experiments%emfit_img%nproc_img, ierror)
+    call mpi_comm_rank(mpi_comm_city, experiments%emfit_img%myrank_img, ierror)
+#else
+    experiments%emfit_img%nproc_img  = 1
+    experiments%emfit_img%myrank_img = 0
+#endif
+
+    if (.not. allocated(experiments%emfit_img%ipx)) then
+        allocate(experiments%emfit_img%ipx(molecule%num_atoms))
+        allocate(experiments%emfit_img%ipy(molecule%num_atoms))
+        allocate(experiments%emfit_img%domain_index(molecule%num_atoms))
+        allocate(experiments%emfit_img%list_local(molecule%num_atoms))
+    end if
+
+    if (.not. allocated(experiments%emfit_img%icount)) then
+        allocate(experiments%emfit_img%icount(experiments%emfit_img%nproc_img))
+        allocate(experiments%emfit_img%px_min_local(experiments%emfit_img%nproc_img))
+        allocate(experiments%emfit_img%px_max_local(experiments%emfit_img%nproc_img))
+        allocate(experiments%emfit_img%py_min_local(experiments%emfit_img%nproc_img))
+        allocate(experiments%emfit_img%py_max_local(experiments%emfit_img%nproc_img))
+    end if
+
+#ifdef HAVE_MPI_GENESIS
+    if (.not. allocated(experiments%emfit_img%sim_image_global)) then
+    allocate(experiments%emfit_img%sim_image_global( &
+      experiments%emfit_img%image_size, experiments%emfit_img%image_size))
+    end if
+#endif
+
     if (main_rank) then
       write(MsgOut,'(A)') 'Setup_Experiments_EmfitImg> Setup variables for EMFIT for images'
       write(MsgOut,'(A20,F10.3)') '  cutoff (pixel)    = ', REAL(experiments%emfit_img%cutoff)
@@ -592,15 +622,8 @@ contains
 
       else if (experiments%emfit_type == ExperimentsEmfitImg) then
        
-#ifdef HAVE_MPI_GENESIS
-      if (main_rank) then
         call compute_energy_experimental_restraint_emfit_img &
-             (enefunc, coord, inum, calc_force, force, virial, eexp, cv)
-      end if
-#else
-      call compute_energy_experimental_restraint_emfit_img &
-       (enefunc, coord, inum, calc_force, force, virial, eexp, cv)
-#endif
+              (enefunc, coord, inum, calc_force, force, virial, eexp, cv)
       endif
     end if
 
@@ -1217,6 +1240,22 @@ contains
     real(wp), pointer :: rot_coord(:,:), gaussians_saved(:,:,:), emfit_img_force(:,:)
     integer,pointer	:: pixels(:,:)
     character(MaxFilename) :: outfile 
+    integer,  pointer :: ipx(:), ipy(:)
+    integer,  pointer :: domain_index(:), list_local(:), icount(:)
+    integer,  pointer :: px_min_local(:), px_max_local(:), py_min_local(:), py_max_local(:)
+
+#ifdef HAVE_MPI_GENESIS
+    real(wp), pointer :: sim_image_global(:,:)
+#endif
+
+    integer :: m, ifound
+    integer :: nproc_img, myrank_img, ierror_img
+    integer :: idomain, iaxis
+    integer :: sum_ip, ave_ip, icount1
+    integer :: px_min, px_max, py_min, py_max
+    integer :: i0, i1, j0, j1
+    integer :: axis_length(2)
+    real(wp) :: before_allreduce(3), after_allreduce(3)
   
     n_atoms = size(coord,2)
     atom_id        => enefunc%restraint_atomlist
@@ -1240,25 +1279,21 @@ contains
     emfit_img_force  => experiments%emfit_img%emfit_img_force       
     gaussians_saved  => experiments%emfit_img%gaussians_saved
 
+    ipx          => experiments%emfit_img%ipx
+    ipy          => experiments%emfit_img%ipy
+    domain_index => experiments%emfit_img%domain_index
+    list_local   => experiments%emfit_img%list_local
+    icount       => experiments%emfit_img%icount
+    px_min_local => experiments%emfit_img%px_min_local
+    px_max_local => experiments%emfit_img%px_max_local
+    py_min_local => experiments%emfit_img%py_min_local
+    py_max_local => experiments%emfit_img%py_max_local
+    nproc_img  = experiments%emfit_img%nproc_img
+    myrank_img = experiments%emfit_img%myrank_img
 
-    ! ------------------------------------------------------------------------
-    ! PERFORM EMFIT OR NOT
-    ! ------------------------------------------------------------------------
-    emfit_icycle = emfit_icycle + 1
-    if (experiments%emfit_img%period /= 0) then
-      if (mod(emfit_icycle,experiments%emfit_img%period) /= 0) then
-        do a=1, n_atoms_group
-          n=  atom_id(a,group_id)
-          force(1:3,n) = force(1:3,n) + emfit_img_force(1:3,n)
-        end do
-        cv= corrcoeff_save
-        force_constant = enefunc%restraint_const(1,inum)
-        eexp = force_constant * (1.0_wp - cv)
-        return
-      end if
-    else
-      return
-    end if
+#ifdef HAVE_MPI_GENESIS
+    sim_image_global => experiments%emfit_img%sim_image_global
+#endif
 
     ! ------------------------------------------------------------------------
     ! ROTATE AND SHIFT PDB
@@ -1289,21 +1324,166 @@ contains
         call error_msg('Compute_Energy_Experimental_Restraint_Emfit_Img> Gaussian kernel is extending outside the map box ')
       endif
     end do
+
+    allocate(ipx(n_atoms_group), ipy(n_atoms_group))
+    do a = 1, n_atoms_group
+        ipx(a) = pixels(1,a) + cutoff
+        ipy(a) = pixels(2,a) + cutoff
+    end do
+
+#ifdef HAVE_MPI_GENESIS
+    call mpi_comm_size(mpi_comm_city, nproc_img, ierror_img)
+    call mpi_comm_rank(mpi_comm_city, myrank_img, ierror_img)
+#else
+    nproc_img  = 1
+    myrank_img = 0
+#endif
+
+    allocate(domain_index(n_atoms_group))
+    allocate(icount(nproc_img))
+    allocate(px_min_local(nproc_img), px_max_local(nproc_img), py_min_local(nproc_img), py_max_local(nproc_img))
+    domain_index(:) = 1
+
+    px_min = 1
+    px_max = image_size
+    py_min = 1
+    py_max = image_size
+
+    icount(:)      = 0
+    icount(1)      = n_atoms_group
+    px_min_local(:)= 0; px_max_local(:)= 0; py_min_local(:)= 0; py_max_local(:)= 0
+    px_min_local(1)= px_min; px_max_local(1)= px_max
+    py_min_local(1)= py_min; py_max_local(1)= py_max
+
+    ! ------------------------------------------------------------------------
+    ! 2D DOMAIN PARTITION (pixel-domain)
+    ! ------------------------------------------------------------------------
+    do i = 1, nproc_img - 1
+
+    ! pick domain with most atoms
+    idomain = maxloc(icount(1:i), dim=1)
+
+    ! copy domain bounds into new domain slot
+    px_min_local(i+1) = px_min_local(idomain)
+    px_max_local(i+1) = px_max_local(idomain)
+    py_min_local(i+1) = py_min_local(idomain)
+    py_max_local(i+1) = py_max_local(idomain)
+
+    axis_length(1) = px_max_local(idomain) - px_min_local(idomain)
+    axis_length(2) = py_max_local(idomain) - py_min_local(idomain)
+    iaxis = maxloc(axis_length(1:2), dim=1)   ! 1 => x, 2 => y
+
+    if (icount(idomain) > 0) then
+        sum_ip = 0
+        do a = 1, n_atoms_group
+          if (domain_index(a) == idomain) then
+            if (iaxis == 1) then
+              sum_ip = sum_ip + ipx(a)
+            else
+              sum_ip = sum_ip + ipy(a)
+            end if
+          end if
+        end do
+        ave_ip = aint(sum_ip / dble(icount(idomain)))
+    else
+      if (iaxis == 1) then
+        ave_ip = (px_min_local(idomain) + px_max_local(idomain)) / 2
+      else
+        ave_ip = (py_min_local(idomain) + py_max_local(idomain)) / 2
+      end if
+    end if
+
+    if (iaxis == 1) then
+      ave_ip = max(px_min_local(idomain), min(ave_ip, px_max_local(idomain)-1))
+      px_max_local(idomain) = ave_ip
+      px_min_local(i+1)     = ave_ip + 1
+    else
+      ave_ip = max(py_min_local(idomain), min(ave_ip, py_max_local(idomain)-1))
+      py_max_local(idomain) = ave_ip
+      py_min_local(i+1)     = ave_ip + 1
+    end if
+
+    icount1 = 0
+    do a = 1, n_atoms_group
+      if (domain_index(a) == idomain) then
+        if (iaxis == 1) then
+          if (ave_ip < ipx(a)) then
+            domain_index(a) = i + 1
+            icount1 = icount1 + 1
+          end if
+        else
+          if (ave_ip < ipy(a)) then
+            domain_index(a) = i + 1
+            icount1 = icount1 + 1
+          end if
+        end if
+      end if
+    end do
+
+    icount(i+1)     = icount1
+    icount(idomain) = icount(idomain) - icount(i+1)
+
+    end do
+
+    px_min = px_min_local(myrank_img+1)
+    px_max = px_max_local(myrank_img+1)
+    py_min = py_min_local(myrank_img+1)
+    py_max = py_max_local(myrank_img+1)
+
+    ! build atom list whose kernel overlaps my domain (+cutoff halo)
+    ifound = 0
+    allocate(list_local(n_atoms_group))
+    do a = 1, n_atoms_group
+    if (ipx(a) < px_min - cutoff) cycle
+    if (ipx(a) > px_max + cutoff) cycle
+    if (ipy(a) < py_min - cutoff) cycle
+    if (ipy(a) > py_max + cutoff) cycle
+    ifound = ifound + 1
+    list_local(ifound) = a
+    end do
+
+    ! ------------------------------------------------------------------------
+    ! PERFORM EMFIT OR NOT
+    ! ------------------------------------------------------------------------
+    emfit_icycle = emfit_icycle + 1
+    if (experiments%emfit_img%period /= 0) then
+        if (mod(emfit_icycle,experiments%emfit_img%period) /= 0) then
+          do m = 1, ifound
+            a = list_local(m)
+            n = atom_id(a,group_id)
+            force(1:3,n) = force(1:3,n) + emfit_img_force(1:3,n)
+          end do
+          cv = corrcoeff_save
+          force_constant = enefunc%restraint_const(1,inum)
+          eexp = force_constant * (1.0_wp - cv)
+          deallocate(ipx, ipy, domain_index, icount, px_min_local, px_max_local, py_min_local, py_max_local, list_local)
+          return
+        end if
+        else
+            deallocate(ipx, ipy, domain_index, icount, px_min_local, px_max_local, py_min_local, py_max_local, list_local)
+            return
+    end if
   
     ! ------------------------------------------------------------------------
     ! GENERATE SIM IMAGE
     ! ------------------------------------------------------------------------
     sim_image(:,:) = 0.0_wp
   
-    !$omp parallel do default(none)                                 &
-    !$omp private(a,i,j , mu, norm, gaussian)                   &
-    !$omp shared(pixels, n_pix,image_size, pixel_size, &
-    !$omp 	rot_coord, sigma, sim_image, gaussians_saved, atom_id, group_id, n_atoms_group)
+    !$omp parallel do default(none) &
+    !$omp private(m,a,n,i,j,mu,norm,gaussian,i0,i1,j0,j1) &
+    !$omp shared(ifound,list_local,atom_id,group_id,pixels,n_pix,image_size,pixel_size, &
+    !$omp        rot_coord,sigma,sim_image,gaussians_saved,px_min,px_max,py_min,py_max,cutoff)
     !
   
-    do a=1, n_atoms_group
-      do j=pixels(2,a), pixels(2,a) + n_pix
-        do i=pixels(1,a), pixels(1,a) + n_pix
+    do m = 1, ifound
+        a = list_local(m)
+        i0 = max(pixels(1,a), px_min)
+        i1 = min(pixels(1,a) + n_pix, px_max)
+        j0 = max(pixels(2,a), py_min)
+        j1 = min(pixels(2,a) + n_pix, py_max)
+
+        do j = j0, j1
+          do i = i0, i1
 
           mu = (/i,j/)
           mu = (mu -1- (image_size / 2)) * pixel_size
@@ -1311,6 +1491,7 @@ contains
           norm = (rot_coord(1,a)-mu(1))**2 + (rot_coord(2,a)-mu(2))**2
           gaussian = exp(-norm / (2 * (sigma ** 2)))
           
+          !$omp atomic
           sim_image(i,j) = sim_image(i,j) + gaussian
   
           ! save the gaussian to avoid computing them for the gradient
@@ -1328,14 +1509,26 @@ contains
     sum_exp2 = 0.0
     sum_simpexp = 0.0
 
-    do j=1, image_size
-      
-      do i=1, image_size
-        sum_sim2 = sum_sim2 + sim_image(i,j) ** 2
-        sum_exp2 = sum_exp2 + exp_image(i,j) ** 2
-        sum_simpexp = sum_simpexp + exp_image(i,j) * sim_image(i,j)
-      end do
+    do j = py_min, py_max
+        do i = px_min, px_max
+          sum_sim2    = sum_sim2    + sim_image(i,j)**2
+          sum_exp2    = sum_exp2    + exp_image(i,j)**2
+          sum_simpexp = sum_simpexp + exp_image(i,j) * sim_image(i,j)
+        end do
     end do
+
+#ifdef HAVE_MPI_GENESIS
+    before_allreduce(1) = sum_sim2
+    before_allreduce(2) = sum_exp2
+    before_allreduce(3) = sum_simpexp
+
+    call mpi_allreduce(before_allreduce, after_allreduce, 3, &
+                     mpi_wp_real, mpi_sum, mpi_comm_city, ierror_img)
+
+    sum_sim2    = after_allreduce(1)
+    sum_exp2    = after_allreduce(2)
+    sum_simpexp = after_allreduce(3)
+#endif
   
     cv= (sum_simpexp / sqrt(sum_sim2 * sum_exp2))
     force_constant = enefunc%restraint_const(1,inum)
@@ -1351,21 +1544,24 @@ contains
       const2 = sum_simpexp / (sqrt(sum_exp2) * sum_sim2**(1.5_wp))
       emfit_img_force(:,:) = 0.0_wp
   
-      !$omp parallel do default(none)                                 &
-      !$omp private(a,n, i, j,mu, dpsim,dcc)     &
-      !$omp shared(pixels, n_pix, image_size, pixel_size, &
-      !$omp 	rot_coord, sigma, sim_image, gaussians_saved, atom_id, group_id,&
-      !$omp 	exp_image, const1, const2, force_constant,&
-      !$omp 	emfit_img_force,inv_rot_matrix, force, experiments)
-      !
-  
-      do a= 1, n_atoms_group
-  
-        n=  atom_id(a,group_id)
+    !$omp parallel do default(none) &
+    !$omp private(m,a,n,i,j,mu,dpsim,dcc,i0,i1,j0,j1) &
+    !$omp shared(ifound,list_local,atom_id,group_id,pixels,n_pix,image_size,pixel_size, &
+    !$omp        rot_coord,sigma,sim_image,gaussians_saved,exp_image,const1,const2,force_constant, &
+    !$omp        emfit_img_force,force,experiments,px_min,px_max,py_min,py_max)
+    do m = 1, ifound
+        a = list_local(m)
+        n = atom_id(a,group_id)
+
         dcc = 0.0_wp
+
+        i0 = max(pixels(1,a), px_min)
+        i1 = min(pixels(1,a) + n_pix, px_max)
+        j0 = max(pixels(2,a), py_min)
+        j1 = min(pixels(2,a) + n_pix, py_max)
   
-        do j=pixels(2,a), pixels(2,a) + n_pix
-          do i=pixels(1,a), pixels(1,a) + n_pix
+        do j = j0, j1
+            do i = i0, i1
 
             mu = (/i,j/)
             mu = (mu -1- (image_size / 2)) * pixel_size
@@ -1373,7 +1569,7 @@ contains
             dcc = dcc + ((exp_image(i,j) * dpsim * const1) - ( sim_image(i,j) * dpsim * const2))
 
           end do
-        enddo
+        end do
   
         emfit_img_force(1:2,n) = dcc * force_constant
         emfit_img_force(1:3,n) = matmul(experiments%emfit_img%inv_rot_matrix(1:3,1:3), &
@@ -1381,7 +1577,6 @@ contains
   
         force(1:3,n) = force(1:3,n) + emfit_img_force(1:3,n)
       end do
-  
       !$omp end parallel do
     end if
 
@@ -1389,13 +1584,27 @@ contains
     ! ------------------------------------------------------------------------
     ! WRITE OUTPUT IMAGE
     ! ------------------------------------------------------------------------
-    if (main_rank) then
-      outfile = emfit_target_test(:index(emfit_target_test, '.', back=.true.)-1) //"_sim.spi"
-      if (mod(emfit_icycle,100) == 0) then 
-        call write_spi(outfile, sim_image)
-      endif
-    endif
+    if (mod(emfit_icycle,100) == 0) then 
+        outfile = emfit_target_test(:index(emfit_target_test, '.', back=.true.)-1) //"_sim.spi"
+#ifdef HAVE_MPI_GENESIS
+        allocate(sim_image_global(image_size, image_size))
+        sim_image_global(:,:) = 0.0_wp
 
+        call mpi_reduce(sim_image, sim_image_global, image_size*image_size, &
+              mpi_wp_real, mpi_sum, 0, mpi_comm_city, ierror_img)
+
+        if (myrank_img == 0) then
+            call write_spi(outfile, sim_image_global)
+        end if
+
+        deallocate(sim_image_global)
+#else
+        if (main_rank) then
+            call write_spi(outfile, sim_image)
+        end if
+#endif
+    end if
+    deallocate(ipx, ipy, domain_index, icount, px_min_local, px_max_local, py_min_local, py_max_local, list_local)
     return
   end subroutine compute_energy_experimental_restraint_emfit_img
   

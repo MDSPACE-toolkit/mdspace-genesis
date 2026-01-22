@@ -75,6 +75,20 @@ module at_experiments_str_mod
     real(wp)              :: rot_matrix(3,3)
     real(wp)              :: inv_rot_matrix(3,3)
 
+#ifdef HAVE_MPI_GENESIS
+    integer :: nproc_img = 1
+    integer :: myrank_img = 0
+
+    integer, allocatable :: ipx(:), ipy(:)
+    integer, allocatable :: domain_index(:)
+    integer, allocatable :: list_local(:)
+    integer, allocatable :: icount(:)
+    integer, allocatable :: px_min_local(:), px_max_local(:)
+    integer, allocatable :: py_min_local(:), py_max_local(:)
+
+    real(wp), allocatable :: sim_image_global(:,:)
+#endif
+
   end type s_emfit_img
 
   ! structures
