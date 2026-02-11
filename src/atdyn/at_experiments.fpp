@@ -1291,6 +1291,25 @@ contains
     nproc_img  = experiments%emfit_img%nproc_img
     myrank_img = experiments%emfit_img%myrank_img
 
+    ! ------------------------------------------------------------------------
+    ! PERFORM EMFIT OR NOT
+    ! ------------------------------------------------------------------------
+    emfit_icycle = emfit_icycle + 1
+    if (experiments%emfit_img%period /= 0) then
+        if (mod(emfit_icycle,experiments%emfit_img%period) /= 0) then
+          do a = 1, n_atoms_group
+            n = atom_id(a,group_id)
+            force(1:3,n) = force(1:3,n) + emfit_img_force(1:3,n)
+          end do
+          cv = corrcoeff_save
+          force_constant = enefunc%restraint_const(1,inum)
+          eexp = force_constant * (1.0_wp - cv)
+          return
+        end if
+        else
+            return
+    end if
+
 #ifdef HAVE_MPI_GENESIS
     sim_image_global => experiments%emfit_img%sim_image_global
 #endif
@@ -1442,27 +1461,6 @@ contains
     list_local(ifound) = a
     end do
 
-    ! ------------------------------------------------------------------------
-    ! PERFORM EMFIT OR NOT
-    ! ------------------------------------------------------------------------
-    emfit_icycle = emfit_icycle + 1
-    if (experiments%emfit_img%period /= 0) then
-        if (mod(emfit_icycle,experiments%emfit_img%period) /= 0) then
-          do m = 1, ifound
-            a = list_local(m)
-            n = atom_id(a,group_id)
-            force(1:3,n) = force(1:3,n) + emfit_img_force(1:3,n)
-          end do
-          cv = corrcoeff_save
-          force_constant = enefunc%restraint_const(1,inum)
-          eexp = force_constant * (1.0_wp - cv)
-          deallocate(ipx, ipy, domain_index, icount, px_min_local, px_max_local, py_min_local, py_max_local, list_local)
-          return
-        end if
-        else
-            deallocate(ipx, ipy, domain_index, icount, px_min_local, px_max_local, py_min_local, py_max_local, list_local)
-            return
-    end if
   
     ! ------------------------------------------------------------------------
     ! GENERATE SIM IMAGE
