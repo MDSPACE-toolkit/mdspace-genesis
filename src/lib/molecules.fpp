@@ -971,8 +971,12 @@ contains
 
       end do
       if (gromol%num_constrs > 0) then
-        call error_msg('Setup_Molecule_Gromacs> [constraints] is not supported.')
-      endif
+        if (main_rank) then
+          write(MsgOut,'(A,I10,A)') &
+            'Setup_Molecule_Gromacs> WARNING: ', gromol%num_constrs, &
+            ' constraints are ignored.'
+        end if
+      end if
 
     end do
 
